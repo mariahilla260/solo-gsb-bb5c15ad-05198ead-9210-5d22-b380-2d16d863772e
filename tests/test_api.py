@@ -1576,6 +1576,64 @@ def test_ink_zones_overlapping_rectangles_return_422():
     assert response.status_code == 422
 
 
+def _ink_rect(x, y, w, h, **channels):
+    return {
+        "x_mm": x, "y_mm": y, "width_mm": w, "height_mm": h,
+        "cyan": channels.get("cyan", 0),
+        "magenta": channels.get("magenta", 0),
+        "yellow": channels.get("yellow", 0),
+        "black": channels.get("black", 0),
+    }
+
+
+def test_ink_zones_tiny_out_of_page_returns_422():
+    # 1e-8 量级越界不得被容差接收并夹回页边；恰好贴边仍为 200
+    out_of_page = [
+        _ink_rect(-0.00000001, 0, 50, 50),
+        _ink_rect(0, -0.00000001, 50, 50),
+        _ink_rect(0, 0, 100.00000001, 50),
+        _ink_rect(0, 0, 50, 100.00000001),
+        _ink_rect(50.00000001, 0, 50, 50),
+    ]
+    for rect in out_of_page:
+        body = {
+            **INK_ZONES_BASE,
+            "page_inks": [{"page": 1, "rectangles": [rect]}],
+        }
+        response = client.post("/api/v1/impose/ink-zones", json=body)
+        assert response.status_code == 422
+    flush = {
+        **INK_ZONES_BASE,
+        "page_inks": [{"page": 1, "rectangles": [_ink_rect(0, 0, 100, 100)]}],
+    }
+    assert client.post("/api/v1/impose/ink-zones", json=flush).status_code == 200
+
+
+def test_ink_zones_tiny_positive_overlap_returns_422():
+    # 两矩形仅交叠 0.00000001 mm（正面积）也必须返回 422；边相切为 200
+    overlapping = [
+        (_ink_rect(0, 0, 50, 50), _ink_rect(49.99999999, 0, 50, 50)),
+        (_ink_rect(0, 0, 50, 50), _ink_rect(0, 49.99999999, 50, 50)),
+    ]
+    for first, second in overlapping:
+        body = {
+            **INK_ZONES_BASE,
+            "page_inks": [{"page": 1, "rectangles": [first, second]}],
+        }
+        response = client.post("/api/v1/impose/ink-zones", json=body)
+        assert response.status_code == 422
+    touching = {
+        **INK_ZONES_BASE,
+        "page_inks": [{"page": 1, "rectangles": [
+            _ink_rect(0, 0, 50, 50),
+            _ink_rect(50, 50, 50, 50),
+        ]}],
+    }
+    assert client.post(
+        "/api/v1/impose/ink-zones", json=touching
+    ).status_code == 200
+
+
 def test_ink_zones_coverage_out_of_range_returns_422():
     body = {
         **INK_ZONES_BASE,

@@ -261,6 +261,43 @@ def test_rect_out_of_page_raises():
             _ink([(1, [rect])])
 
 
+def test_tiny_out_of_page_still_raises_no_tolerance():
+    # 1e-8 量级的越界不得被浮点容差接收、也不得夹回页边
+    for rect in (
+        (-0.00000001, 0.0, 50.0, 50.0, 0.0, 0.0, 0.0, 0.0),
+        (0.0, -0.00000001, 50.0, 50.0, 0.0, 0.0, 0.0, 0.0),
+        (0.0, 0.0, 100.00000001, 50.0, 0.0, 0.0, 0.0, 0.0),
+        (0.0, 0.0, 50.0, 100.00000001, 0.0, 0.0, 0.0, 0.0),
+        (50.00000001, 0.0, 50.0, 50.0, 0.0, 0.0, 0.0, 0.0),
+    ):
+        with pytest.raises(ValueError):
+            _ink([(1, [rect])])
+
+
+def test_exactly_flush_edges_are_valid():
+    # 恰好贴住四边（含由最短十进制表示精确相等）合法，且不被夹改
+    result = _ink([
+        (1, [
+            (0.0, 0.0, 100.0, 100.0, 1.0, 0.0, 0.0, 0.0),
+        ]),
+    ])
+    # 第 1 页在右槽 x=100，整页 -> 纸面 100..200，4 墨区落区 3、4，
+    # 每区交叠 50 × 100 = 5000
+    front = _zones(result)["front"]
+    assert set(front) == {3, 4}
+    assert front[3]["cyan_mm2"] == 5000.0
+    assert front[4]["cyan_mm2"] == 5000.0
+    # 右缘恰好贴页宽、下沿恰好贴页高的小矩形
+    result = _ink([
+        (1, [(99.99999999, 99.99999999, 0.00000001, 0.00000001,
+             1.0, 0.0, 0.0, 0.0)]),
+    ])
+    front = _zones(result)["front"]
+    # 面积 1e-16 mm²，落纸面 199.99999999 所在的第 4 墨区
+    assert list(front) == [4]
+    assert front[4]["cyan_mm2"] == pytest.approx(1e-16)
+
+
 def test_overlapping_rectangles_raise():
     with pytest.raises(ValueError):
         _ink([
@@ -269,6 +306,33 @@ def test_overlapping_rectangles_raise():
                 (40, 40, 20, 20, 0.0, 0.0, 0.0, 0.0),
             ]),
         ])
+
+
+def test_tiny_positive_overlap_raises_no_tolerance():
+    # 两矩形仅交叠 1e-8 mm（正面积）也必须拒绝；边相切则合法
+    overlap_cases = (
+        # x 方向交叠 1e-8
+        ((0, 0, 50, 50), (50 - 0.00000001, 0, 50, 50)),
+        # y 方向交叠 1e-8
+        ((0, 0, 50, 50), (0, 50 - 0.00000001, 50, 50)),
+        # 右下角插入 1e-8 × 1e-8
+        ((0, 0, 50, 50), (50 - 0.00000001, 50 - 0.00000001, 50, 50)),
+    )
+    for first, second in overlap_cases:
+        with pytest.raises(ValueError):
+            _ink([
+                (1, [
+                    (*first, 0.0, 0.0, 0.0, 0.0),
+                    (*second, 0.0, 0.0, 0.0, 0.0),
+                ]),
+            ])
+    # 恰好边相切（交叠面积 0）仍然合法
+    _ink([
+        (1, [
+            (0, 0, 50, 50, 0.0, 0.0, 0.0, 0.0),
+            (50, 50, 50, 50, 0.0, 0.0, 0.0, 0.0),
+        ]),
+    ])
 
 
 def test_coverage_out_of_range_raises():

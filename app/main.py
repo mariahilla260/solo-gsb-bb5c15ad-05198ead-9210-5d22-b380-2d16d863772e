@@ -323,7 +323,13 @@ class PageInk(BaseModel):
 
     page: int = Field(..., ge=1, description="页码，从 1 开始；同一页码只能出现一次")
     rectangles: list[InkRectangle] = Field(
-        ..., min_length=1, description="该页的页内矩形列表，互不重叠且完整落在页面内"
+        ...,
+        min_length=1,
+        description=(
+            "该页的页内矩形列表，按解析后数值的最短十进制表示严格判定："
+            "互不正面积交叠（边相切允许）且完整落在页面内（贴边允许，"
+            "任何越界哪怕仅 0.00000001 mm 均返回 422）"
+        ),
     )
 
     @field_validator("page", mode="before")
