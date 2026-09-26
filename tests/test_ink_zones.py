@@ -261,6 +261,38 @@ def test_rect_out_of_page_raises():
             _ink([(1, [rect])])
 
 
+def test_rect_marginally_out_of_page_raises():
+    # 回归：页内矩形任何越界均抛 ValueError（API 层 422），
+    # 不再按容差接收并夹回页边（如 x_mm = -0.00000001）
+    for rect in (
+        (-0.00000001, 0.0, 10.0, 10.0, 0.0, 0.0, 0.0, 0.0),      # x 微负
+        (0.0, -0.00000001, 10.0, 10.0, 0.0, 0.0, 0.0, 0.0),      # y 微负
+        (99.999999995, 0.0, 0.00000001, 10.0, 0.0, 0.0, 0.0, 0.0),   # x + w = 100.000000005 > 100
+        (0.0, 99.999999995, 10.0, 0.00000001, 0.0, 0.0, 0.0, 0.0),   # y + h = 100.000000005 > 100
+    ):
+        with pytest.raises(ValueError):
+            _ink([(1, [rect])])
+
+
+def test_decimal_exact_edge_touch_is_valid():
+    # 恰好贴边按最短十进制判定合法：0.1 + 0.2 在二进制浮点下为
+    # 0.30000000000000004 > 0.3，十进制下恰好等于 0.3（贴边）
+    result = _ink(
+        [(1, [(0.1, 0.0, 0.2, 0.3, 1.0, 0.0, 0.0, 0.0)])],
+        page_width_mm=0.3,
+        page_height_mm=0.3,
+    )
+    front = _zones(result)["front"]
+    assert sum(z["cyan_mm2"] for z in front.values()) == pytest.approx(0.06)
+    # 十进制下严格越界（0.1 + 0.21 > 0.3）仍拒绝
+    with pytest.raises(ValueError):
+        _ink(
+            [(1, [(0.1, 0.0, 0.21, 0.3, 1.0, 0.0, 0.0, 0.0)])],
+            page_width_mm=0.3,
+            page_height_mm=0.3,
+        )
+
+
 def test_overlapping_rectangles_raise():
     with pytest.raises(ValueError):
         _ink([
@@ -269,6 +301,21 @@ def test_overlapping_rectangles_raise():
                 (40, 40, 20, 20, 0.0, 0.0, 0.0, 0.0),
             ]),
         ])
+
+
+def test_marginal_overlap_raises():
+    # 回归：同页矩形正面积交叠按最短十进制严格判定，
+    # 仅交叠 0.00000001 mm 也非法（x 方向与 y 方向分别验证）
+    with pytest.raises(ValueError):
+        _ink([(1, [
+            (0.0, 0.0, 50.0, 50.0, 0.0, 0.0, 0.0, 0.0),
+            (49.99999999, 0.0, 50.0, 50.0, 0.0, 0.0, 0.0, 0.0),
+        ])])
+    with pytest.raises(ValueError):
+        _ink([(1, [
+            (0.0, 0.0, 50.0, 50.0, 0.0, 0.0, 0.0, 0.0),
+            (0.0, 49.99999999, 50.0, 50.0, 0.0, 0.0, 0.0, 0.0),
+        ])])
 
 
 def test_coverage_out_of_range_raises():

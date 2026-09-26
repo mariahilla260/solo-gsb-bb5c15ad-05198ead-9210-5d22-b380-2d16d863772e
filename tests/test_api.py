@@ -1560,6 +1560,40 @@ def test_ink_zones_rect_out_of_page_returns_422():
         assert response.status_code == 422
 
 
+def test_ink_zones_marginal_out_of_page_returns_422():
+    # 回归：1e-8 量级越界不再被容差接收并夹回页边，按最短十进制严格判定
+    for rect in (
+        {"x_mm": -0.00000001, "y_mm": 0, "width_mm": 10, "height_mm": 10},
+        {"x_mm": 0, "y_mm": -0.00000001, "width_mm": 10, "height_mm": 10},
+        {"x_mm": 99.999999995, "y_mm": 0, "width_mm": 0.00000001, "height_mm": 10},
+    ):
+        rect = {**rect, "cyan": 0, "magenta": 0, "yellow": 0, "black": 0}
+        body = {
+            **INK_ZONES_BASE,
+            "page_inks": [{"page": 1, "rectangles": [rect]}],
+        }
+        response = client.post("/api/v1/impose/ink-zones", json=body)
+        assert response.status_code == 422
+
+
+def test_ink_zones_decimal_exact_edge_touch_ok():
+    # 0.1 + 0.2 在二进制浮点下为 0.30000000000000004 > 0.3，
+    # 按最短十进制表示恰好贴边（合法）
+    body = {
+        **INK_ZONES_BASE,
+        "page_width_mm": 0.3,
+        "page_height_mm": 0.3,
+        "page_inks": [
+            {"page": 1, "rectangles": [
+                {"x_mm": 0.1, "y_mm": 0, "width_mm": 0.2, "height_mm": 0.3,
+                 "cyan": 1, "magenta": 0, "yellow": 0, "black": 0},
+            ]},
+        ],
+    }
+    response = client.post("/api/v1/impose/ink-zones", json=body)
+    assert response.status_code == 200
+
+
 def test_ink_zones_overlapping_rectangles_return_422():
     body = {
         **INK_ZONES_BASE,
@@ -1568,6 +1602,23 @@ def test_ink_zones_overlapping_rectangles_return_422():
                 {"x_mm": 0, "y_mm": 0, "width_mm": 50, "height_mm": 50,
                  "cyan": 0, "magenta": 0, "yellow": 0, "black": 0},
                 {"x_mm": 40, "y_mm": 40, "width_mm": 20, "height_mm": 20,
+                 "cyan": 0, "magenta": 0, "yellow": 0, "black": 0},
+            ]},
+        ],
+    }
+    response = client.post("/api/v1/impose/ink-zones", json=body)
+    assert response.status_code == 422
+
+
+def test_ink_zones_marginal_overlap_returns_422():
+    # 回归：两矩形仅交叠 0.00000001 mm 也属正面积交叠，按最短十进制严格判定
+    body = {
+        **INK_ZONES_BASE,
+        "page_inks": [
+            {"page": 1, "rectangles": [
+                {"x_mm": 0, "y_mm": 0, "width_mm": 50, "height_mm": 50,
+                 "cyan": 0, "magenta": 0, "yellow": 0, "black": 0},
+                {"x_mm": 49.99999999, "y_mm": 0, "width_mm": 50, "height_mm": 50,
                  "cyan": 0, "magenta": 0, "yellow": 0, "black": 0},
             ]},
         ],

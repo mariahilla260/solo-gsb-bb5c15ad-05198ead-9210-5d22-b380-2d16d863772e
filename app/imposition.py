@@ -362,22 +362,25 @@ PageRect = Tuple[float, float, float, float, float, float, float, float]
 # 单页墨稿：(页码, [页内矩形, ...])
 PageInk = Tuple[int, List[PageRect]]
 
+# 十进制页内矩形：(左上角 x, 左上角 y, 宽, 高)，
+# 由请求数值的最短十进制表示精确转换（见 _to_decimal）；
+# ink-zones 的矩形校验与 trim-safety 的安全判定共用这一约定
+DecimalRect = Tuple[Decimal, Decimal, Decimal, Decimal]
 
-def _rects_overlap(
-    a: PageRect, b: PageRect, eps: float = 1e-9
-) -> bool:
-    """两个页内矩形（左上原点、x/y/宽/高）是否有正面积交叠。
 
-    边相切（交叠面积为 0）不算重叠；``eps`` 为相对尺度的容差，用于抵消浮点误差。
+def _rects_overlap_decimal(a: DecimalRect, b: DecimalRect) -> bool:
+    """两个页内矩形（十进制左上原点、x/y/宽/高）是否有正面积交叠。
+
+    边相切（交叠面积为 0）不算重叠；严格按十进制比较，不设浮点容差，
+    哪怕只交叠 1e-8 mm 也判定为重叠。
     """
-    ax, ay, aw, ah = a[:4]
-    bx, by, bw, bh = b[:4]
-    tolerance = eps * max(1.0, ax + aw, ay + ah, bx + bw, by + bh)
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
     return (
-        ax < bx + bw - tolerance
-        and bx < ax + aw - tolerance
-        and ay < by + bh - tolerance
-        and by < ay + ah - tolerance
+        ax < bx + bw
+        and bx < ax + aw
+        and ay < by + bh
+        and by < ay + ah
     )
 
 
@@ -411,6 +414,12 @@ def ink_zones(
     按帖、张、正反面与墨区返回结果；空白页位（末帖补白）不参与统计，
     任何通道均为 0 的墨区也不输出（矩形落在中缝内的部分同理为 0）。
 
+    页内矩形的坐标、宽高、页内边界与同页正面积交叠一律按解析后数值的
+    **最短十进制表示**（``Decimal``，与 :func:`trim_safety` / :func:`plan_stock`
+    同一约定）精确判定，**不设浮点容差、不夹回页面**：贴边（矩形边与页边
+    恰好重合）合法，任何越界（含 ``x = -0.00000001`` 这类 1e-8 量级）或
+    正面积交叠（哪怕只交叠 1e-8 mm）都判定为请求非法。
+
     以下情况抛 ``ValueError``（API 层对应 422）：墨区数量不在 1～16、
     印数不是正整数、页码无效（非正或超过总页数）、同页出现两次、
     页内矩形坐标/宽高为非有限值或越出页面（允许贴边）、同页矩形正面积重叠、
@@ -429,6 +438,13 @@ def ink_zones(
     ):
         raise ValueError("印数 copies 必须为正整数")
 
+    # 页内矩形校验按解析后数值的最短十进制表示（Decimal）精确判定：
+    # 浮点容差会把 1e-8 量级的越界/交叠误判为贴边（如 x = -0.00000001 被
+    # 容差接收并夹回页边），只有十进制严格比较才能保证“贴边合法、
+    # 任何越界或正面积交叠非法”（与 trim_safety / plan_stock 同一约定）
+    page_width_d = _to_decimal(page_width_mm)
+    page_height_d = _to_decimal(page_height_mm)
+
     inks_by_page: dict = {}
     for page_index, (page, rects) in enumerate(page_inks, start=1):
         if not isinstance(page, int) or isinstance(page, bool) or not (
@@ -442,9 +458,9 @@ def ink_zones(
             raise ValueError(f"第 {page} 页的页内矩形重复给出，每页只能出现一次")
         if not rects:
             raise ValueError(f"第 {page} 页至少需要给出 1 个页内矩形")
-        scale = max(1.0, page_width_mm, page_height_mm)
-        tolerance = 1e-9 * scale
-        validated: List[PageRect] = []
+        # 先逐矩形解析为十进制尺寸（字段完整性与有限性随解析校验）
+        parsed: List[Tuple[PageRect, DecimalRect, int]] = []
+        page_sizes: List[Decimal] = [page_width_d, page_height_d]
         for rect_index, rect in enumerate(rects, start=1):
             if len(rect) != 8:
                 raise ValueError(f"第 {page} 页第 {rect_index} 个矩形字段不完整")
@@ -455,41 +471,52 @@ def ink_zones(
                     f"第 {page} 页第 {rect_index} 个矩形含非有限数值"
                     "（NaN / Infinity）"
                 )
-            if rx < -tolerance or ry < -tolerance:
-                raise ValueError(
-                    f"第 {page} 页第 {rect_index} 个矩形越出页面："
-                    f"左上角 ({rx}, {ry}) 不能为负"
-                )
-            if rw <= 0 or rh <= 0:
-                raise ValueError(
-                    f"第 {page} 页第 {rect_index} 个矩形越界：宽、高必须为正数"
-                )
-            if rx + rw > page_width_mm + tolerance or (
-                ry + rh > page_height_mm + tolerance
-            ):
-                raise ValueError(
-                    f"第 {page} 页第 {rect_index} 个矩形越出页面："
-                    f"矩形 ({rx}, {ry}, {rw}, {rh}) 须完整落在 "
-                    f"{page_width_mm} × {page_height_mm}（mm）的页面内"
-                )
-            # 夹回边界，消除贴边时的浮点误差
-            rx = max(0.0, min(rx, page_width_mm))
-            ry = max(0.0, min(ry, page_height_mm))
-            rw = min(rw, page_width_mm - rx)
-            rh = min(rh, page_height_mm - ry)
-            for channel, coverage in zip(INK_CHANNELS, (c, m, y_value, k)):
-                if not 0.0 <= coverage <= 1.0:
+            rect_d = (
+                _to_decimal(rx),
+                _to_decimal(ry),
+                _to_decimal(rw),
+                _to_decimal(rh),
+            )
+            page_sizes.extend(rect_d)
+            parsed.append(((rx, ry, rw, rh, c, m, y_value, k), rect_d, rect_index))
+
+        validated: List[PageRect] = []
+        validated_d: List[DecimalRect] = []
+        # 精度覆盖本页全部尺寸，保证边界与交叠判定精确无舍入
+        with localcontext() as ctx:
+            ctx.prec = _decimal_prec(*page_sizes)
+            for (rx, ry, rw, rh, c, m, y_value, k), rect_d, rect_index in parsed:
+                rx_d, ry_d, rw_d, rh_d = rect_d
+                # 任何越界都是请求错误：严格按十进制判定，不容差、不夹回页面
+                if rx_d < 0 or ry_d < 0:
                     raise ValueError(
-                        f"第 {page} 页第 {rect_index} 个矩形的 {channel} 通道"
-                        f"覆盖率 {coverage} 越界，须在 0～1 之间"
+                        f"第 {page} 页第 {rect_index} 个矩形越出页面："
+                        f"左上角 ({rx}, {ry}) 不能为负"
                     )
-            for other in validated:
-                if _rects_overlap(other, (rx, ry, rw, rh, c, m, y_value, k)):
+                if rw_d <= 0 or rh_d <= 0:
                     raise ValueError(
-                        f"第 {page} 页的页内矩形互不重叠：第 {rect_index} 个矩形"
-                        f" ({rx}, {ry}, {rw}, {rh}) 与此前矩形正面积交叠"
+                        f"第 {page} 页第 {rect_index} 个矩形越界：宽、高必须为正数"
                     )
-            validated.append((rx, ry, rw, rh, c, m, y_value, k))
+                if rx_d + rw_d > page_width_d or ry_d + rh_d > page_height_d:
+                    raise ValueError(
+                        f"第 {page} 页第 {rect_index} 个矩形越出页面："
+                        f"矩形 ({rx}, {ry}, {rw}, {rh}) 须完整落在 "
+                        f"{page_width_mm} × {page_height_mm}（mm）的页面内"
+                    )
+                for channel, coverage in zip(INK_CHANNELS, (c, m, y_value, k)):
+                    if not 0.0 <= coverage <= 1.0:
+                        raise ValueError(
+                            f"第 {page} 页第 {rect_index} 个矩形的 {channel} 通道"
+                            f"覆盖率 {coverage} 越界，须在 0～1 之间"
+                        )
+                for other_d in validated_d:
+                    if _rects_overlap_decimal(other_d, rect_d):
+                        raise ValueError(
+                            f"第 {page} 页的页内矩形互不重叠：第 {rect_index} 个矩形"
+                            f" ({rx}, {ry}, {rw}, {rh}) 与此前矩形正面积交叠"
+                        )
+                validated.append((rx, ry, rw, rh, c, m, y_value, k))
+                validated_d.append(rect_d)
         inks_by_page[page] = validated
 
     geometry, layout = _build_press_layout(
@@ -601,10 +628,6 @@ PageProtected = Tuple[int, List[ProtectedRect]]
 # top/bottom=纸面顶/底边（外裁），outer=纸面外侧竖边（左槽靠左缘、右槽靠右缘，
 # 外裁），fold=中缝折缝侧
 TRIM_EDGE_ORDER: Tuple[str, ...] = ("top", "bottom", "outer", "fold")
-
-# 十进制页内矩形：(左上角 x, 左上角 y, 宽, 高)，
-# 由请求数值的最短十进制表示精确转换（见 _to_decimal）
-DecimalRect = Tuple[Decimal, Decimal, Decimal, Decimal]
 
 
 def _page_rect_to_paper_decimal(
